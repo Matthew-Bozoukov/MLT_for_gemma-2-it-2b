@@ -46,3 +46,41 @@ To make the graph interpretable the graph needs to be heavily pruned, where embe
 The same matrix $B$ is generated, but this time a score is assigned to each edge by multiplying the logit influence score of the edge's output by the normalized edge weight. The edges are pruned with the same cutoff threshold strategy as the nodes, with a threshold of 0.98 working for them.
 
 Lastly, to prune logit nodes, the logit nodes that correspond to the top K most likely token outputs are kept and the rest are pruned, as well as having the total probability of the logit nodes not exceeding 0.95 (if they do, K is clamped to 10).
+
+```python
+# pseudocode
+def prune_graph(adj_matrix): # takes the adjacency matrix of the attribution graph as the input
+  adj_matrix = normalize_rows(abs(adj_matrix))
+  indirect_influence = torch.linalg.inv((torch.eye(adj_matrix.size(0)) - adj_matrix)) - torch.eye(adj_matrix.size(0)) # gets the indirect influence matrix of A
+
+  # non-logit pruning
+  logit_influences = indirect_influence[logit_nodes] # where logit_nodes is some mask for all the nodes corresponding to logits
+  logit_scores = (output_probs.unsqueeze(1) * logit_influences).sum(dim=0) # then get weighted average
+  sorted_non_logits = torch.argsort(logit_scores[non_logit_indices], descending=True) # sort over non-logit nodes
+  sorted_scores = logit_scores[non_logit_indices][sorted_non_logits]
+  cutoff_idx = find_cutoff_cumsum(sorted_scores) # finds cutoff where the cumulative sum of the scores reaches over some threshold
+  kept_non_logits = non_logit_indices[sorted_non_logits[:cutoff_idx]] # prune out the ones before cutoff
+  adj_matrix = prune_node(adj_matrix, ~kept_non_logits) # prune the graph
+
+  # weight pruning
+  adj_matrix = normalize_rows(abs(adj_matrix)) # repeating the computations on the pruned graph
+  indirect_influence = torch.linalg.inv((torch.eye(adj_matrix.size(0)) - adj_matrix)) - torch.eye(adj_matrix.size(0))
+  logit_influences = indirect_influence[logit_nodes]
+  logit_scores = (output_probs.unsqueeze(1) * logit_influences).sum(dim=0)
+
+  edge_scores = adj_matrix * logit_scores.unsqueeze(0) # get logit influence scores for each edge
+  sorted_edges = torch.argsort(edge_scores.flatten(), descending=True)
+  cutoff_idx = find_cutoff_cumsum(sorted_edges)
+  kept_edges = edge_indices[sorted_edges[:cutoff_idx]] # get non pruned edges
+  adj_matrix = prune_edge(adj_matrix, ~kept_edges) # prune the graph
+
+  # logit pruning
+  sorted_logit_probs, sorted_logit_indices = torch.sort(output_probs, descending=True) # sort output probabilities from the model
+  cum_probs = torch.cumsum(sorted_logit_probs, dim=0) gets the cumulative sum of the probabilities
+  k = torch.searchsorted(cum_probs, torch.tensor(logit_prob_threshold, device=device)) + 1 # finds the smallest sum of k logits such that they are above some threshold
+  k = min(k.item(), max_logits) # max_logits is 10 in the original (acts as an upper bound)
+  kept_logits = logit_nodes[sorted_logit_indices[:k]] # remove all but the top k logits
+  adj_matrix = prune_node(adj_matrix, ~kept_logits) # prune the graph
+
+  return adj_matrix
+```
